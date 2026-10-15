@@ -145,6 +145,484 @@ nav button.on{color:var(--acc);font-weight:700}
 <script>
 // ===== 設定（他のアプリと同じURLとanonキー） =====
 const SUPABASE_URL = 'https://mdqzseflgmesziiwhdif.supabase.co';
+const SUPABASE_KEY = 'ここに他のアプリと同じanonキー（eyJ〜）を貼る';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ===== 状態 =====
+const S = { me:null, staff:[], genres:[], items:[], res:[], prac:[], pass:[],
+  tab:'list', seg:'todo', sorting:false, month:'', genre:'all', q:'', open:null, editing:false, adding:false };
+
+const app = document.getElementById('app');
+const sheetEl = document.getElementById('sheet');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const save = (k,v) => { try { v==null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch(e){} };
+const load = k => { try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } };
+const fmt = d => { const x = new Date(d); return `${x.getMonth()+1}/${x.getDate()}`; };
+const WD='日月火水木金土';
+const pad=n=>String(n).padStart(2,'0');
+const today=()=>{const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;};
+const pDay=p=>p.practiced_on||(p.created_at||'').slice(0,10);
+const fmtD=s=>{const [y,m,d]=s.split('-').map(Number);return `${m}/${d}(${WD[new Date(y,m-1,d).getDay()]})`;};
+S.month = today().slice(0,7);
+const isOwner = () => !!(S.me && S.me.is_owner);
+let toastT;
+function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2200); }
+
+// ===== URL判定 =====
+const PF = { youtube:{l:'YouTube',c:'yt'}, tiktok:{l:'TikTok',c:'tt'}, instagram:{l:'Instagram',c:'ig'}, web:{l:'Web',c:'web'} };
+function platform(u){ u=(u||'').toLowerCase();
+  if(u.includes('youtube.com')||u.includes('youtu.be')) return 'youtube';
+  if(u.includes('tiktok.com')) return 'tiktok';
+  if(u.includes('instagram.com')) return 'instagram';
+  return 'web'; }
+function ytId(u){ const m=(u||'').match(/(?:youtu\.be\/|[?&]v=|shorts\/|embed\/|live\/)([\w-]{11})/); return m?m[1]:null; }
+
+// ===== データ =====
+async function fetchAll(){
+  const q = await Promise.all([
+    sb.from('art_staff').select('name,is_owner,sort').order('sort'),
+    sb.from('art_genres').select('*').order('sort'),
+    sb.from('art_items').select('*').order('sort').order('id'),
+    sb.from('art_resources').select('*').order('sort').order('id'),
+    sb.from('art_practice').select('*').order('practiced_on',{ascending:false}).order('created_at',{ascending:false}),
+    sb.from('art_pass').select('*'),
+  ]);
+  const bad = q.find(r=>r.error);
+  if(bad) toast('読み込みエラー：'+bad.error.message);
+  [S.staff,S.genres,S.items,S.res,S.prac,S.pass] = q.map(r=>r.data||[]);
+}
+const genreOf = id => S.genres.find(g=>g.id===id);
+const itemOf = id => S.items.find(i=>i.id===id);
+const resOf = id => S.res.filter(r=>r.item_id===id);
+const pracOf = (id,name) => S.prac.filter(p=>p.item_id===id && (!name||p.staff_name===name));
+const passed = (id,name) => S.pass.some(p=>p.item_id===id && p.staff_name===name);
+const learners = () => S.staff.filter(s=>!s.is_owner);
+
+// ===== 画面：ログイン =====
+function renderLogin(){
+  sheetEl.innerHTML='';
+  app.innerHTML = `<div class="login">
+    <div class="logo">💅</div><h1>アート資料室</h1>
+    <p class="sub">みんなで技術アップ！</p>
+    <label>なまえ<select id="lgName">${S.staff.map(s=>`<option>${esc(s.name)}</option>`).join('')}</select></label>
+    <label>PIN<input id="lgPin" type="password" inputmode="numeric" maxlength="8"></label>
+    <button class="btn primary big" data-a="login">はじめる</button>
+  </div>`;
+}
+
+// ===== 画面：メイン =====
+function render(){
+  if(!S.me) return renderLogin();
+  app.innerHTML = `
+  <header><div class="wrap">
+    <div class="hrow"><h1>💅 アート資料室</h1>
+      <div class="who">${esc(S.me.name)}${isOwner()?' 👑':''}<button data-a="logout">切替</button></div></div>
+    ${S.tab==='list' ? `
+      <div class="srow"><input class="search" id="q" placeholder="アート名でさがす（例：チェック）" value="${esc(S.q)}">${isOwner()?`<button class="sortbtn ${S.sorting?'on':''}" data-a="sorting">${S.sorting?'完了':'並び替え'}</button>`:''}</div>
+      ${!isOwner() ? (()=>{const d=S.items.filter(i=>passed(i.id,S.me.name)).length;return `<div class="seg"><button class="${S.seg==='todo'?'on':''}" data-a="seg" data-id="todo">まだ合格してない<b>${S.items.length-d}</b></button><button class="${S.seg==='done'?'on':''}" data-a="seg" data-id="done">合格済み<b>${d}</b></button></div>`;})() : ''}
+      <div class="chips"><button class="chip ${S.genre==='all'?'on':''}" data-a="genre" data-id="all">すべて</button>
+      ${S.genres.map(g=>`<button class="chip ${S.genre===g.id?'on':''}" data-a="genre" data-id="${g.id}">${esc(g.emoji||'')} ${esc(g.name)}</button>`).join('')}</div>` : ''}
+  </div></header>
+  <main class="wrap" id="main"></main>
+  ${S.tab==='list' && isOwner() ? `<button class="fab" data-a="addItemOpen" aria-label="アート追加">＋</button>` : ''}
+  <nav>
+    <button class="${S.tab==='list'?'on':''}" data-a="tab" data-id="list"><span>📚</span>資料</button>
+    <button class="${S.tab==='prog'?'on':''}" data-a="tab" data-id="prog"><span>📈</span>${isOwner()?'みんなの進捗':'わたしの記録'}</button>
+  </nav>`;
+  renderMain();
+  renderSheet();
+}
+
+function renderMain(){
+  const m = document.getElementById('main'); if(!m) return;
+  if(S.tab==='prog') { m.innerHTML = renderProgress(); return; }
+  const q = S.sorting ? '' : S.q.trim();
+  const gs = S.genres.filter(g=>S.genre==='all'||g.id===S.genre);
+  const segOk = it => isOwner() || (S.seg==='done') === passed(it.id,S.me.name);
+  let html = S.sorting ? `<div class="sortnote">◀ ▶ でアートの順番、▲ ▼ でジャンルの順番を入れ替えられるよ。終わったら「完了」を押してね</div>` : '';
+  for(const g of gs){
+    const its = S.items.filter(i=>i.genre_id===g.id && (!q || i.name.includes(q)) && segOk(i));
+    if(!its.length && !S.sorting) continue;
+    const h = `<h2>${esc(g.emoji||'')} ${esc(g.name)}</h2>`;
+    html += (S.sorting ? `<div class="h2row">${h}<div class="mv"><button data-a="mvG" data-id="${g.id}" data-d="-1" aria-label="ジャンルを上へ">▲</button><button data-a="mvG" data-id="${g.id}" data-d="1" aria-label="ジャンルを下へ">▼</button></div></div>` : h)
+      + `<div class="grid">` + its.map(card).join('') + `</div>`;
+  }
+  const emptyMsg = q ? '見つからなかったよ🥲' : (!isOwner() && S.seg==='done') ? 'まだ合格したアートはないよ。練習あるのみ💪' : (!isOwner()) ? 'ぜんぶ合格！すごすぎる🎉' : '見つからなかったよ🥲';
+  m.innerHTML = html || `<div class="empty">${emptyMsg}</div>`;
+}
+
+function card(it){
+  if(S.sorting) return `<div class="card sorting"><div class="cname">${esc(it.name)}</div><div class="mv"><button data-a="mvI" data-id="${it.id}" data-d="-1" aria-label="前へ">◀</button><button data-a="mvI" data-id="${it.id}" data-d="1" aria-label="後へ">▶</button></div></div>`;
+  const n = resOf(it.id).length;
+  let meta = `<span>📎 資料${n}</span>`;
+  if(isOwner()){
+    const done = learners().filter(s=>passed(it.id,s.name)).length;
+    meta += `<span>🎓 合格${done}/${learners().length}</span>`;
+  } else {
+    const c = pracOf(it.id,S.me.name).length;
+    meta += `<span>✏️ ${c}回</span>` + (passed(it.id,S.me.name)?`<span class="badge ok">合格</span>`:'');
+  }
+  if(n===0) meta += `<span class="badge none">資料なし</span>`;
+  return `<button class="card" data-a="open" data-id="${it.id}"><div class="cname">${esc(it.name)}</div><div class="cmeta">${meta}</div></button>`;
+}
+
+// ===== 詳細シート =====
+function renderSheet(){
+  if(S.adding) { sheetEl.innerHTML = addItemSheet(); return; }
+  if(!S.open){ sheetEl.innerHTML=''; document.body.style.overflow=''; return; }
+  const it = itemOf(S.open); if(!it){ S.open=null; sheetEl.innerHTML=''; return; }
+  document.body.style.overflow='hidden';
+  const g = genreOf(it.genre_id);
+  const res = resOf(it.id);
+  const logs = isOwner() ? pracOf(it.id) : pracOf(it.id,S.me.name);
+
+  const head = S.editing ? `
+    <div class="form">
+      <select id="edGenre">${S.genres.map(x=>`<option value="${x.id}" ${x.id===it.genre_id?'selected':''}>${esc(x.name)}</option>`).join('')}</select>
+      <input id="edName" value="${esc(it.name)}" placeholder="アート名">
+      <textarea id="edMemo" placeholder="みさとからのメモ（コツ・注意点など）">${esc(it.memo||'')}</textarea>
+      <div class="row"><button class="btn" data-a="editCancel">やめる</button><button class="btn primary" data-a="editSave">保存</button></div>
+      <button class="mini del" data-a="delItem">このアートを削除</button>
+    </div>` : `
+    <div class="shead"><div><div class="gname">${esc(g?(g.emoji+' '+g.name):'')}</div><h3>${esc(it.name)}</h3></div>
+      <div class="row" style="flex:0 0 auto">${isOwner()?`<button class="mini" data-a="editOpen">編集</button>`:''}<button class="x" data-a="close">✕</button></div></div>
+    ${it.memo?`<div class="memo">💬 ${esc(it.memo)}</div>`:''}`;
+
+  const resHtml = res.length ? res.map(r=>{
+    const p = PF[platform(r.url)]; const id = ytId(r.url);
+    const th = id ? `<img class="thumb" src="https://img.youtube.com/vi/${id}/mqdefault.jpg" loading="lazy" alt="">` : `<div class="thumb ph ${p.c}">${p.l}</div>`;
+    return `<div class="res"><a class="reslink" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${th}
+      <div class="resbody"><span class="pf ${p.c}">${p.l} ↗</span><div class="rtitle">${esc(r.title||'資料をひらく')}</div>${r.point?`<div class="point">👀 ${esc(r.point)}</div>`:''}</div></a>
+      ${isOwner()?`<div class="rctl"><button class="mini" data-a="mvR" data-id="${r.id}" data-d="-1" aria-label="上へ">▲</button><button class="mini" data-a="mvR" data-id="${r.id}" data-d="1" aria-label="下へ">▼</button><button class="mini del" data-a="delRes" data-id="${r.id}">削除</button></div>`:''}</div>`;
+  }).join('') : `<div class="empty" style="padding:16px 0">まだ資料がないよ</div>`;
+
+  const addRes = isOwner() ? `<div class="form" style="margin-top:8px">
+      <input id="rUrl" type="url" placeholder="URL（YouTube / TikTok / Instagram）">
+      <input id="rTitle" placeholder="タイトル（例：初心者向けチェック）">
+      <input id="rPoint" placeholder="注目ポイント（例：2:30からのライン引き）">
+      <button class="btn primary" data-a="addRes">＋ 資料を追加</button></div>` : '';
+
+  let passHtml = '';
+  if(isOwner()){
+    passHtml = `<div class="sec"><h4>🎓 合格チェック</h4>` + (learners().map(s=>{
+      const ok = passed(it.id,s.name), c = pracOf(it.id,s.name).length;
+      return `<div class="passrow"><span>${esc(s.name)} <small style="color:var(--sub)">練習${c}回</small></span>
+        <button class="btn ${ok?'okb':''}" style="padding:6px 12px" data-a="togglePass" data-name="${esc(s.name)}">${ok?'✅ 合格':'未'}</button></div>`;
+    }).join('') || `<div class="empty">スタッフが登録されてないよ</div>`) + `</div>`;
+  } else {
+    passHtml = passed(it.id,S.me.name)
+      ? `<div class="status ok">🎉 合格！おめでとう！</div>`
+      : `<div class="status go">練習を重ねて合格をめざそう💪</div>`;
+  }
+
+  const pracBox = !isOwner() ? `<div class="sec"><h4>✏️ 練習記録</h4>
+      <div class="form"><label class="dlabel">練習した日<input id="pDate" type="date" value="${today()}" max="${today()}"></label>
+      <input id="pComment" placeholder="ひとこと（例：ラインが太くなった）">
+      <button class="btn primary big" data-a="practice">練習した！</button></div></div>` : `<div class="sec"><h4>✏️ みんなの練習記録</h4></div>`;
+
+  const logHtml = logs.slice(0,30).map(l=>`<div class="log"><div>${isOwner()?`<b>${esc(l.staff_name)}</b> `:''}${esc(l.comment||'練習した')}</div>
+      <div class="row" style="flex:0 0 auto"><span class="d">${fmtD(pDay(l))}</span>${(isOwner()||l.staff_name===S.me.name)?`<button class="mini del" data-a="delPrac" data-id="${l.id}">✕</button>`:''}</div></div>`).join('')
+    || `<div class="empty" style="padding:12px 0">まだ記録がないよ</div>`;
+
+  sheetEl.innerHTML = `<div class="overlay" data-a="overlay"><div class="sheet">
+    ${head}
+    <div class="sec"><h4>🎬 参考資料</h4>${resHtml}${addRes}</div>
+    ${passHtml}${pracBox}${logHtml}
+  </div></div>`;
+}
+
+function addItemSheet(){
+  document.body.style.overflow='hidden';
+  const def = S.genre==='all' ? (S.genres[0]?.id||'') : S.genre;
+  return `<div class="overlay" data-a="overlay"><div class="sheet">
+    <div class="shead"><h3>アートを追加</h3><button class="x" data-a="close">✕</button></div>
+    <div class="form" style="margin-top:12px">
+      <select id="nGenre">${S.genres.map(g=>`<option value="${g.id}" ${g.id===def?'selected':''}>${esc(g.emoji+' '+g.name)}</option>`).join('')}<option value="new">＋ 新しいジャンル</option></select>
+      <input id="nGenreName" placeholder="新しいジャンル名（＋を選んだ時だけ）">
+      <input id="nName" placeholder="アート名（例：ミラーフレンチ）">
+      <textarea id="nMemo" placeholder="メモ（コツ・注意点）"></textarea>
+      <button class="btn primary big" data-a="addItem">追加する</button>
+    </div></div></div>`;
+}
+
+// ===== 進捗 =====
+function renderProgress(){
+  const people = isOwner() ? learners() : [S.me];
+  const total = S.items.length;
+  if(!people.length) return `<div class="empty">スタッフが登録されてないよ</div>`;
+  return monthLog() + people.map(s=>{
+    const mine = S.prac.filter(p=>p.staff_name===s.name);
+    const ok = S.pass.filter(p=>p.staff_name===s.name).length;
+    const kinds = [...new Set(mine.map(p=>p.item_id))];
+    const last = mine[0] ? fmtD(pDay(mine[0])) : '—';
+    const thisM = mine.filter(p=>pDay(p).startsWith(today().slice(0,7))).length;
+    const pct = total ? Math.round(ok/total*100) : 0;
+    const list = kinds.map(id=>{ const it=itemOf(id); if(!it) return '';
+      return `<div><span>${esc(it.name)}</span><span>${mine.filter(p=>p.item_id===id).length}回 ${passed(id,s.name)?'✅':''}</span></div>`; }).join('');
+    return `<div class="pcard"><h3>${esc(s.name)}</h3>
+      <div class="stats"><div class="stat"><b>${mine.length}</b><small>練習回数</small></div>
+      <div class="stat"><b>${kinds.length}</b><small>練習したアート</small></div>
+      <div class="stat"><b>${ok}</b><small>合格</small></div></div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      <div style="font-size:12px;color:var(--sub)">合格 ${ok}/${total}（${pct}%）・今月 ${thisM}回・最終練習 ${last}</div>
+      ${list?`<div class="plist">${list}</div>`:''}</div>`;
+  }).join('');
+}
+
+function monthLog(){
+  const mm=S.month, [y,m]=mm.split('-').map(Number);
+  const logs=S.prac.filter(p=>pDay(p).startsWith(mm) && (isOwner()||p.staff_name===S.me.name));
+  const days=[...new Set(logs.map(pDay))];
+  const body=days.map(d=>`<div class="day"><div class="dh">${fmtD(d)}</div>`+logs.filter(p=>pDay(p)===d).map(p=>{const it=itemOf(p.item_id);
+    return `<div class="dl">${isOwner()?`<b>${esc(p.staff_name)}</b>`:''}<span class="an">${esc(it?it.name:'')}</span>${p.comment?`<span class="cm">${esc(p.comment)}</span>`:''}</div>`;}).join('')+`</div>`).join('');
+  return `<div class="pcard"><div class="mhead"><button class="mini" data-a="month" data-id="-1" aria-label="前の月">‹</button><h3>📅 ${y}年${m}月の練習</h3><button class="mini" data-a="month" data-id="1" aria-label="次の月">›</button></div>
+    <div style="font-size:12px;color:var(--sub);text-align:center;margin-top:4px">${logs.length}回・${days.length}日</div>
+    ${body||`<div class="empty" style="padding:16px 0">この月の練習記録はまだないよ</div>`}</div>`;
+}
+
+// ===== 操作 =====
+async function move(table, list, id, d){
+  const i=list.findIndex(x=>x.id===id), j=i+Number(d);
+  if(i<0||j<0||j>=list.length) return;
+  const arr=[...list]; [arr[i],arr[j]]=[arr[j],arr[i]];
+  const rs=await Promise.all(arr.map((x,k)=>sb.from(table).update({sort:k+1}).eq('id',x.id)));
+  const bad=rs.find(r=>r.error); if(bad) toast('エラー：'+bad.error.message);
+  await fetchAll(); render();
+}
+const val = id => (document.getElementById(id)?.value||'').trim();
+async function run(p, okMsg){ const {error} = await p; if(error){ toast('エラー：'+error.message); return false; } await fetchAll(); if(okMsg) toast(okMsg); return true; }
+
+document.addEventListener('input', e=>{ if(e.target.id==='q'){ S.q=e.target.value; renderMain(); } });
+document.addEventListener('click', async e=>{
+  const el = e.target.closest('[data-a]'); if(!el) return;
+  const a = el.dataset.a, id = el.dataset.id;
+  if(a==='overlay' && e.target!==el) return;
+
+  switch(a){
+    case 'login': {
+      const name=val('lgName'), pin=val('lgPin');
+      const {data,error} = await sb.from('art_staff').select('name,is_owner').eq('name',name).eq('pin',pin);
+      if(error) return toast('エラー：'+error.message);
+      if(!data.length) return toast('PINがちがうよ');
+      S.me=data[0]; save('artMe',S.me); render(); break; }
+    case 'logout': S.me=null; save('artMe',null); S.open=null; render(); break;
+    case 'month': { let [y,m]=S.month.split('-').map(Number); m+=Number(id); if(m<1){m=12;y--;} if(m>12){m=1;y++;} S.month=`${y}-${pad(m)}`; renderMain(); break; }
+    case 'sorting': S.sorting=!S.sorting; render(); break;
+    case 'seg': S.seg=id; render(); window.scrollTo(0,0); break;
+    case 'mvI': { const it=itemOf(Number(id)); await move('art_items', S.items.filter(i=>i.genre_id===it.genre_id), it.id, el.dataset.d); break; }
+    case 'mvG': await move('art_genres', S.genres, Number(id), el.dataset.d); break;
+    case 'mvR': await move('art_resources', resOf(S.open), Number(id), el.dataset.d); break;
+    case 'tab': S.sorting=false; S.tab=id; S.open=null; render(); window.scrollTo(0,0); break;
+    case 'genre': S.genre = id==='all'?'all':Number(id); render(); break;
+    case 'open': S.open=Number(id); S.editing=false; renderSheet(); break;
+    case 'overlay': case 'close': S.open=null; S.adding=false; S.editing=false; renderSheet(); renderMain(); break;
+    case 'editOpen': S.editing=true; renderSheet(); break;
+    case 'editCancel': S.editing=false; renderSheet(); break;
+    case 'editSave': {
+      const name=val('edName'); if(!name) return toast('アート名を入れてね');
+      if(await run(sb.from('art_items').update({name, memo:val('edMemo')||null, genre_id:Number(val('edGenre'))}).eq('id',S.open),'保存したよ')){ S.editing=false; render(); }
+      break; }
+    case 'delItem':
+      if(!confirm('このアートと資料・練習記録をぜんぶ削除する？')) return;
+      if(await run(sb.from('art_items').delete().eq('id',S.open),'削除したよ')){ S.open=null; S.editing=false; render(); }
+      break;
+    case 'addRes': {
+      const url=val('rUrl');
+      if(!/^https?:\/\//i.test(url)) return toast('http〜で始まるURLを入れてね');
+      if(await run(sb.from('art_resources').insert({item_id:S.open,url,sort:resOf(S.open).length+1,title:val('rTitle')||null,point:val('rPoint')||null}),'資料を追加したよ')) render();
+      break; }
+    case 'delRes':
+      if(!confirm('この資料を削除する？')) return;
+      if(await run(sb.from('art_resources').delete().eq('id',Number(id)))) render();
+      break;
+    case 'practice':
+      if(await run(sb.from('art_practice').insert({item_id:S.open,staff_name:S.me.name,comment:val('pComment')||null,practiced_on:val('pDate')||today()}),'記録したよ！えらい👏')) render();
+      break;
+    case 'delPrac':
+      if(!confirm('この記録を消す？')) return;
+      if(await run(sb.from('art_practice').delete().eq('id',Number(id)))) render();
+      break;
+    case 'togglePass': {
+      const name=el.dataset.name;
+      const p = passed(S.open,name)
+        ? sb.from('art_pass').delete().eq('item_id',S.open).eq('staff_name',name)
+        : sb.from('art_pass').insert({item_id:S.open,staff_name:name});
+      if(await run(p, passed(S.open,name)?'合格を取り消したよ':'🎉 合格にしたよ')) render();
+      break; }
+    case 'addItemOpen': S.adding=true; renderSheet(); break;
+    case 'addItem': {
+      const name=val('nName'); if(!name) return toast('アート名を入れてね');
+      let gid = val('nGenre');
+      if(gid==='new'){
+        const gname=val('nGenreName'); if(!gname) return toast('新しいジャンル名を入れてね');
+        const {data,error} = await sb.from('art_genres').insert({name:gname,emoji:'💅',sort:S.genres.length+1}).select().single();
+        if(error) return toast('エラー：'+error.message);
+        gid=data.id;
+      }
+      const sort = S.items.filter(i=>i.genre_id===Number(gid)).length+1;
+      if(await run(sb.from('art_items').insert({genre_id:Number(gid),name,memo:val('nMemo')||null,sort}),'追加したよ')){ S.adding=false; render(); }
+      break; }
+  }
+});
+
+// ===== 起動 =====
+(async ()=>{
+  app.innerHTML = `<div class="empty">よみこみ中…💅</div>`;
+  await fetchAll();
+  const me = load('artMe');
+  if(me && S.staff.some(s=>s.name===me.name)) S.me = S.staff.find(s=>s.name===me.name);
+  render();
+})();
+</script>
+</body>
+</html>
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>アート資料室</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{
+  --bg:#faf5f2;--card:#ffffff;--ink:#3d3230;--sub:#8c7d79;--line:#efe3dd;
+  --acc:#c4868a;--acc-ink:#ffffff;--acc-soft:#f6e4e3;
+  --ok:#4f9a7e;--okbg:#e1f1e9;--warn:#c9605c;
+  --yt:#e5332a;--tt:#111111;--ig1:#f58529;--ig2:#dd2a7b;--ig3:#8134af;--web:#7a8aa0;
+  --shadow:0 2px 12px rgba(120,80,70,.08);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#1f1a19;--card:#2a2423;--ink:#f2e9e6;--sub:#b3a39f;--line:#3b3331;
+    --acc:#d99ca0;--acc-ink:#2a1f1f;--acc-soft:#3d2c2d;--ok:#7cc4a6;--okbg:#21372e;--tt:#f2f2f2;
+    --shadow:0 2px 12px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#1f1a19;--card:#2a2423;--ink:#f2e9e6;--sub:#b3a39f;--line:#3b3331;
+  --acc:#d99ca0;--acc-ink:#2a1f1f;--acc-soft:#3d2c2d;--ok:#7cc4a6;--okbg:#21372e;--tt:#f2f2f2;
+  --shadow:0 2px 12px rgba(0,0,0,.3);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--ink);font-family:"Zen Maru Gothic",-apple-system,"Hiragino Sans",sans-serif;font-size:15px;line-height:1.55}
+body{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
+button,input,select,textarea{font:inherit;color:inherit}
+.wrap{max-width:640px;margin:0 auto;padding:0 16px}
+header{position:sticky;top:0;z-index:5;background:var(--bg);padding:14px 0 10px;border-bottom:1px solid var(--line)}
+.hrow{display:flex;align-items:center;justify-content:space-between;gap:8px}
+h1{font-size:19px;margin:0;font-weight:700;letter-spacing:.02em}
+.who{font-size:12px;color:var(--sub);display:flex;gap:6px;align-items:center}
+.who button{background:none;border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:12px;color:var(--sub)}
+.search{margin-top:10px;width:100%;padding:10px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card)}
+.chips{display:flex;gap:6px;overflow-x:auto;padding:10px 0 2px;scrollbar-width:none}
+.chips::-webkit-scrollbar{display:none}
+.chip{flex:0 0 auto;border:1px solid var(--line);background:var(--card);border-radius:999px;padding:6px 12px;font-size:13px}
+.chip.on{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
+h2{font-size:15px;margin:22px 0 10px;color:var(--sub);font-weight:700}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.card{text-align:left;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:6px;min-height:78px}
+.cname{font-weight:700;font-size:14px}
+.cmeta{display:flex;flex-wrap:wrap;gap:6px;font-size:11.5px;color:var(--sub)}
+.badge{font-size:11px;border-radius:999px;padding:1px 8px;font-weight:700}
+.badge.ok{background:var(--okbg);color:var(--ok)}
+.badge.none{background:var(--acc-soft);color:var(--acc)}
+.empty{color:var(--sub);text-align:center;padding:40px 0;font-size:14px}
+.fab{position:fixed;right:18px;bottom:calc(88px + env(safe-area-inset-bottom));width:54px;height:54px;border-radius:50%;border:none;background:var(--acc);color:var(--acc-ink);font-size:28px;box-shadow:0 4px 14px rgba(0,0,0,.18);z-index:6}
+nav{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);display:flex;padding-bottom:env(safe-area-inset-bottom);z-index:6}
+nav button{flex:1;background:none;border:none;padding:10px 0 12px;font-size:12px;color:var(--sub);display:flex;flex-direction:column;align-items:center;gap:2px}
+nav button span{font-size:20px}
+nav button.on{color:var(--acc);font-weight:700}
+/* sheet */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:10;display:flex;align-items:flex-end;justify-content:center}
+.sheet{background:var(--bg);width:100%;max-width:640px;max-height:92vh;overflow-y:auto;border-radius:20px 20px 0 0;padding:16px 16px calc(28px + env(safe-area-inset-bottom))}
+.shead{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.shead h3{margin:0;font-size:20px}
+.gname{font-size:12px;color:var(--sub)}
+.x{background:var(--card);border:1px solid var(--line);border-radius:50%;width:34px;height:34px;flex:0 0 auto;font-size:16px}
+.memo{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:10px;font-size:13.5px;white-space:pre-wrap}
+.sec{margin-top:20px}
+.sec h4{margin:0 0 8px;font-size:14px}
+.res{display:flex;gap:8px;align-items:stretch;margin-bottom:8px}
+.reslink{flex:1;display:flex;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px;text-decoration:none;color:inherit;box-shadow:var(--shadow);min-width:0}
+.thumb{width:92px;height:62px;border-radius:8px;object-fit:cover;flex:0 0 auto;background:var(--line)}
+.ph{display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:12px}
+.ph.yt{background:var(--yt)}.ph.tt{background:#111}.ph.ig{background:linear-gradient(135deg,var(--ig1),var(--ig2),var(--ig3))}.ph.web{background:var(--web)}
+.resbody{min-width:0;display:flex;flex-direction:column;gap:2px}
+.pf{font-size:10.5px;font-weight:700}
+.pf.yt{color:var(--yt)}.pf.tt{color:var(--tt)}.pf.ig{color:var(--ig2)}.pf.web{color:var(--web)}
+.rtitle{font-size:13.5px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.point{font-size:12.5px;color:var(--sub)}
+.form{background:var(--card);border:1px dashed var(--acc);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.form input,.form textarea,.form select,.login input,.login select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg)}
+.form textarea{min-height:60px;resize:vertical}
+.btn{border:none;border-radius:12px;padding:11px 14px;font-weight:700;background:var(--acc-soft);color:var(--acc)}
+.btn.primary{background:var(--acc);color:var(--acc-ink)}
+.btn.big{width:100%;padding:14px;font-size:16px}
+.btn.okb{background:var(--ok);color:#fff}
+.mini{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:4px 10px;font-size:12px;color:var(--sub)}
+.mini.del{color:var(--warn)}
+.row{display:flex;gap:8px;align-items:center}
+.row > *{flex:1}
+.log{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+.log .d{color:var(--sub);font-size:12px;white-space:nowrap}
+.passrow{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:6px;font-size:13.5px}
+.status{border-radius:12px;padding:12px;text-align:center;font-weight:700;margin-top:10px}
+.status.ok{background:var(--okbg);color:var(--ok)}
+.status.go{background:var(--acc-soft);color:var(--acc)}
+/* progress */
+.pcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:12px;box-shadow:var(--shadow)}
+.pcard h3{margin:0 0 8px;font-size:16px}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;text-align:center}
+.stat{background:var(--bg);border-radius:10px;padding:8px 4px}
+.stat b{display:block;font-size:20px;color:var(--acc)}
+.stat small{font-size:11px;color:var(--sub)}
+.bar{height:8px;background:var(--line);border-radius:999px;margin:10px 0 4px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--ok);border-radius:999px}
+.plist{margin-top:10px;font-size:13px}
+.plist div{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px dashed var(--line)}
+/* login */
+.login{max-width:360px;margin:12vh auto 0;padding:0 16px;text-align:center;display:flex;flex-direction:column;gap:12px}
+.login .logo{font-size:44px}
+.login h1{font-size:24px}
+.login .sub{color:var(--sub);margin:-6px 0 8px;font-size:13px}
+.login label{text-align:left;font-size:13px;color:var(--sub);display:flex;flex-direction:column;gap:4px}
+.toast{position:fixed;left:50%;bottom:calc(150px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:999px;font-size:13px;z-index:30;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90vw;text-align:center}
+.toast.show{opacity:1}
+.srow{display:flex;gap:8px;margin-top:10px}
+.srow .search{margin-top:0;flex:1;min-width:0}
+.sortbtn{flex:0 0 auto;border:1px solid var(--acc);background:var(--card);color:var(--acc);border-radius:12px;padding:0 12px;font-size:13px;font-weight:700}
+.sortbtn.on{background:var(--acc);color:var(--acc-ink)}
+.seg{display:flex;gap:3px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:3px;margin-top:10px}
+.seg button{flex:1;border:none;background:none;border-radius:9px;padding:8px 4px;font-size:13px;color:var(--sub)}
+.seg button.on{background:var(--acc);color:var(--acc-ink);font-weight:700}
+.seg b{font-variant-numeric:tabular-nums;margin-left:2px}
+.h2row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.mv{display:flex;gap:4px}
+.mv button{border:1px solid var(--line);background:var(--card);border-radius:8px;min-width:34px;height:30px;font-size:13px;color:var(--ink)}
+.card.sorting{border-style:dashed;justify-content:space-between}
+.sortnote{font-size:12px;color:var(--acc);margin-top:12px}
+.rctl{display:flex;flex-direction:column;gap:4px}
+.dlabel{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--sub)}
+.mhead{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.mhead h3{margin:0;font-size:15px;flex:1;text-align:center}
+.mhead .mini{font-size:16px;padding:2px 12px}
+.day{margin-top:12px}
+.dh{font-weight:700;font-size:13px;color:var(--acc);border-bottom:1px solid var(--line);padding-bottom:4px;margin-bottom:2px;font-variant-numeric:tabular-nums}
+.dl{display:flex;flex-wrap:wrap;gap:2px 8px;font-size:13px;padding:5px 0;border-bottom:1px dashed var(--line)}
+.dl .an{font-weight:700}
+.dl .cm{color:var(--sub);flex-basis:100%}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="sheet"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ===== 設定（他のアプリと同じURLとanonキー） =====
+const SUPABASE_URL = 'https://mdqzseflgmesziiwhdif.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1kcXpzZWZsZ21lc3ppaXdoZGlmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0NjYzMzgsImV4cCI6MjA5NjA0MjMzOH0.f8xnZ-dxxbg-PY6Ev-5sOi_EyoV3FHfaybSWyR3rZ-4';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
